@@ -1,0 +1,74 @@
+services:
+  # 1. MLflow Tracking Server & Artifact Store
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:latest
+    container_name: mlflow_server
+    ports:
+      - "5001:5000"  # Exposes MLflow UI on your host machine at http://localhost:5001
+    environment:
+      - MLFLOW_SERVER_ALLOWED_HOSTS=*
+    volumes:
+      - ./mlruns:/mlflow/mlruns         # Persists SQLite DB and experiment metadata locally
+      - ./mlartifacts:/mlflow/mlartifacts # Persists logged model files & artifacts locally
+
+    command: >
+      mlflow server
+      --backend-store-uri sqlite:////mlflow/mlruns/mlflow.db
+      --default-artifact-root /mlflow/mlartifacts
+      --host 0.0.0.0
+      --port 5000
+      --workers 1
+
+    healthcheck:
+      test: [ "CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://127.0.0.1:5000/\")'" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  # 2. Model Training One-Off Runner Service
+  trainer:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: propensity_trainer
+    command: python src/train.py
+    volumes:
+      - .:/app  # Mounts root folder so train.py can access data/clean_data.csv and save logs
+      - ./mlruns:/mlflow/mlruns
+      - ./mlartifacts:/mlflow/mlartifacts
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000  # Direct internal container URL for MLflow
+    depends_on:
+      mlflow:
+        condition: service_healthy
+
+  # 3. FastAPI Real-Time Inference Engine
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: propensity_api
+    ports:
+      - "8000:8000"
+    command: ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow:5000
+    volumes:
+      - .:/app
+      - ./mlartifacts:/mlflow/mlartifacts
+      - ./mlruns:/mlflow/mlruns
+
+  # 4. Streamlit Interactive Web Dashboard
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: propensity_ui
+    ports:
+      - "8501:8501"  # Exposes Streamlit app at http://localhost:8501
+    volumes:
+      - .:/app                  # maps entire folder
+    command: ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+    depends_on:
+      - api  # Waits for FastAPI backend to be up before starting UI

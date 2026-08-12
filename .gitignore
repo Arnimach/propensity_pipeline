@@ -1,0 +1,15 @@
+# Local MLflow tracking & artifacts (keep git lightweight)
+mlruns/
+mlartifacts/
+
+# python virtual environment and cache
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# IDE/OS settings
+.DS_store
+.ipynb_checkpoints/
+.idea/
+**/.ipynb_checkpoints/
