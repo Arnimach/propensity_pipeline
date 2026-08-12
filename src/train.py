@@ -48,6 +48,31 @@ class RankAverageEnsemblePyfunc(mlflow.pyfunc.PythonModel):
 
 
 def create_models(n_seeds=5):
+    """ 
+    Instantiates a varied ensemble of classifier models across multiple random seeds.
+
+    Generates a list of named model tuples containing distinct hyperparameter 
+    configurations for Random Forest, XGBoost, and LightGBM classifiers. Each parameter 
+    variant is replicated across `n_seeds` to support seed-averaging and robust 
+    out-of-fold ensembling.
+
+    Args:
+        n_seeds (int, optional): The number of random seeds to iterate over for 
+            model initialization. Defaults to 5.
+
+    Returns:
+        list of tuple(str, estimator): A list of `(model_name, estimator)` tuples, 
+        where `model_name` is formatted as `"{model_type}_{config_index}_{seed}"` 
+        and `estimator` is an un-fit classifier instance.
+
+    Example:
+        >>> models = create_models(n_seeds=3)
+        We have set up a total of 27 models.
+        >>> models[0]
+        ('rf_0_0', RandomForestClassifier(class_weight='balanced', max_depth=10, ...))
+    """
+    
+    
     all_models = []
 
     rf_params = [
@@ -91,6 +116,33 @@ def create_models(n_seeds=5):
 
 
 def creat_oof_preds(X, y, models, cat_features, num_features):
+    """
+    Generates out-of-fold (OOF) probability predictions for multiple estimators.
+
+    Executes stratified 5-fold cross-validation for a list of baseline models.
+    For each fold, preprocessing (one-hot encoding categorical features and scaling 
+    numerical features via RobustScaler) is fit strictly on the training set to prevent 
+    data leakage before fitting the model and predicting validation probabilities.
+
+    Args:
+        X (pandas.DataFrame): Feature matrix containing raw input data.
+        y (pandas.Series or array-like): Target labels for binary classification.
+        models (list of tuple(str, estimator)): A list of tuples where each element 
+            contains a model identifier string and an uninstantiated/fitted Scikit-Learn 
+            compatible classifier (e.g., [('lgbm', LGBMClassifier()), ('rf', RandomForestClassifier())]).
+        cat_features (list of str): List of categorical column names to be one-hot encoded.
+        num_features (list of str): List of numerical column names to be robustly scaled.
+
+    Returns:
+        dict: A dictionary mapping each model name (str) to a 1D NumPy array (np.ndarray) 
+        of out-of-fold predicted class 1 probabilities corresponding to the original index order of X.
+
+    Example:
+        >>> models = [('rf', RandomForestClassifier(random_state=42))]
+        >>> oof_dict = creat_oof_preds(X_df, y_series, models, ['cat1'], ['num1', 'num2'])
+        >>> rf_oof_probs = oof_dict['rf']
+    """
+    
     # Dictionary to store each model's full OOF predictions array
     oof_preds = {}
 
@@ -124,7 +176,38 @@ def creat_oof_preds(X, y, models, cat_features, num_features):
     return oof_preds
 
 
+
 def get_ranked_predictions(oof_predictions, y, top_k=30, corr_threshold=0.95):
+    """
+    Ranks candidate models by optimal $F_2$ score and creates a rank-averaged blend of diverse predictions.
+
+    Evaluates out-of-fold (OOF) predicted probabilities across a grid of classification 
+    thresholds to maximize the $F_2$ score (prioritizing recall). Models are sorted by performance 
+    and greedily selected to enforce diversity by excluding candidate models whose OOF predictions 
+    exceed a Pearson correlation threshold (`corr_threshold`) with any previously selected model. 
+    Finally, predictions from selected models are converted to percentile ranks and averaged.
+
+    Args:
+        oof_predictions (dict[str, np.ndarray]): Dictionary mapping model identifiers to 1D arrays 
+            of predicted probabilities.
+        y (pd.Series or np.ndarray): Ground-truth binary target labels.
+        top_k (int, optional): Maximum number of diverse models to include in the blend. Defaults to 30.
+        corr_threshold (float, optional): Maximum allowed Pearson correlation between candidate 
+            model predictions and already selected models. Defaults to 0.95.
+
+    Returns:
+        tuple[list[str], pd.Series, pd.DataFrame]: A 3-element tuple containing:
+            - **selected_models** (*list[str]*): Identifiers of the diverse models selected for the final blend.
+            - **final_blend_oof** (*pd.Series*): Percentile rank-averaged OOF probability series.
+            - **df_scores** (*pd.DataFrame*): Ranked DataFrame containing model names, optimal $F_2$ scores, 
+              and best decision thresholds.
+
+    Example:
+        >>> selected_names, blend_series, scores_df = get_ranked_predictions(
+        ...     oof_dict, y_true, top_k=10, corr_threshold=0.90
+        ... )
+    """
+    
     # Step 1: Score all  models using F2 Score (tuning threshold)
     print(f"Scoring all candidate models using f2 score...")
     model_metrics = []
@@ -181,8 +264,29 @@ def get_ranked_predictions(oof_predictions, y, top_k=30, corr_threshold=0.95):
 
 
 def train():
+    """
+    Executes the end-to-end model training, ensembling, and deployment workflow.
 
-    # step#1 load the clean data file
+    Loads cleaned web session data, instantiates multiple baseline classification 
+    models, generates out-of-fold (OOF) cross-validation predictions, selects a diverse 
+    subset of top-performing models using $F_2$ score optimization and correlation 
+    filtering, and creates a rank-averaged ensemble. 
+
+    The selected base pipelines are fitted on the full dataset, encapsulated into 
+    a custom MLflow `pyfunc` model, logged to the active tracking server, registered 
+    in the MLflow Model Registry under 'PropensityModel', and assigned the '@Production' alias.
+
+    Returns:
+        None
+
+    Side Effects:
+        - Reads data from 'data/clean_data.csv'.
+        - Creates a new MLflow run under 'Rank_Average_Ensemble_Run'.
+        - Logs hyperparameter metadata, $F_2$ validation metrics, and model artifacts.
+        - Registers a new model version in MLflow and updates the '@Production' alias.
+    """
+
+    # step 1 load the clean data file
     df = pd.read_csv("data/clean_data.csv")
 
     # define categorical and numerical columns
